@@ -484,6 +484,21 @@ function windBand(upper) {
 
 
 const WINTER_RE = /snow|flurr|blizzard|winter|sleet|freezing rain|ice storm|wintry|frost|freeze/i;
+const MARINE_ALERT_RE = /small craft|gale|special marine|marine weather|coastal flood|rip current|high surf|hazardous seas|beach hazard|tsunami|storm surge|hurricane force|freezing spray|brisk wind|low water|seiche|lakeshore/i;
+
+function isMarineAlert(item) {
+  return MARINE_ALERT_RE.test([item && item.event, item && item.headline].join(" "));
+}
+
+function mapAlertFeature(f) {
+  const props = (f && f.properties) || {};
+  return {
+    event: props.event || "Alert",
+    severity: props.severity || "",
+    headline: props.headline || props.event || "Alert",
+    ends: props.ends || null,
+  };
+}
 const LOW_ELEVATION_M = 1500;
 
 function metersAndFeet(m) {
@@ -696,15 +711,7 @@ export async function loadBriefing(lat, lon, now = new Date()) {
     const features = alertsR.data.features || [];
     alerts = {
       ok: true,
-      items: features.slice(0, 6).map((f) => {
-        const p = f.properties || {};
-        return {
-          event: p.event || "Alert",
-          severity: p.severity || "",
-          headline: p.headline || p.event || "Alert",
-          ends: p.ends || null,
-        };
-      }),
+      items: features.slice(0, 8).map(mapAlertFeature),
     };
   }
 
@@ -719,6 +726,32 @@ export async function loadBriefing(lat, lon, now = new Date()) {
     now,
   });
   const gridProps = gridR.ok ? (gridR.data.properties || {}) : null;
+  let zoneAlerts = { ok: true, items: [], skipped: !marine.zoneId };
+  if (marine.zoneId) {
+    const zoneR = await fetchSection("https://api.weather.gov/alerts/active?zone=" + encodeURIComponent(marine.zoneId));
+    if (!zoneR.ok) zoneAlerts = { ok: false, items: [], reason: zoneR.reason, zoneId: marine.zoneId };
+    else zoneAlerts = { ok: true, items: ((zoneR.data && zoneR.data.features) || []).slice(0, 8).map(mapAlertFeature), zoneId: marine.zoneId };
+  }
+  const seenMarine = new Set();
+  const marineAdvisories = [];
+  const pointMarine = alerts.ok ? alerts.items.filter(isMarineAlert) : [];
+  const zoneMarine = zoneAlerts.ok ? zoneAlerts.items : [];
+  for (const item of zoneMarine.concat(pointMarine)) {
+    const key = item.event + "|" + item.headline;
+    if (seenMarine.has(key)) continue;
+    seenMarine.add(key);
+    marineAdvisories.push(item);
+  }
+  const marineAdvisoryReport = {
+    ok: alerts.ok || zoneAlerts.ok,
+    items: marineAdvisories,
+    zoneId: marine.zoneId || null,
+    pointFailed: !alerts.ok,
+    zoneFailed: Boolean(marine.zoneId) && !zoneAlerts.ok,
+    pointReason: alerts.ok ? null : alerts.reason,
+    zoneReason: zoneAlerts.ok ? null : zoneAlerts.reason,
+  };
+
   const sailing = buildSailing({
     periods,
     gridProps,
@@ -745,7 +778,7 @@ export async function loadBriefing(lat, lon, now = new Date()) {
   return {
     place, timeZone, lat: latR, lon: lonR, now,
     sunrise, sunset, civilBegin, civilEnd,
-    weather, marine, tides, alerts, best, sailing, skiing,
+    weather, marine, tides, alerts, best, sailing, skiing, marineAdvisoryReport,
     pointsUrl: "https://api.weather.gov/points/" + latR + "," + lonR,
     office: props.gridId || "",
   };
@@ -970,6 +1003,58 @@ function render(model, loc) {
     seaCard.appendChild(el("p", "sub", (sea.how || "") + " NWS grid " + sea.gridId + " " + sea.gridX + "," + sea.gridY + ". Forecast grid, not a buoy."));
   }
   sailPanel.appendChild(seaCard);
+
+  const tideCard = el("section", "card");
+  tideCard.appendChild(el("h2", null, "Tides"));
+  if (!model.tides || !model.tides.ok) {
+    tideCard.appendChild(el("p", "reason", "Tides aren't available. " + ((model.tides && model.tides.reason) || "")));
+  } else {
+    const st = model.tides.station;
+    tideCard.appendChild(el("p", "lead", st.name + (st.state ? ", " + st.state : "") + " · " + st.km.toFixed(0) + " km · MLLW"));
+    const todayKey = localDateKey(model.now, tz);
+    const todayEvents = model.tides.events.filter((e) => localDateKey(e.time, tz) === todayKey);
+    if (!todayEvents.length) {
+      tideCard.appendChild(el("p", "reason", "No high or low is dated today at this station."));
+    } else {
+      const list = el("ul");
+      for (const e of todayEvents) {
+        const li = el("li", e.time < model.now ? "past" : "");
+        li.appendChild(el("span", null, e.type + " " + formatWhen(e.time, tz) + " " + z));
+        li.appendChild(el("span", null, e.feet.toFixed(2) + " ft"));
+        list.appendChild(li);
+      }
+      tideCard.appendChild(list);
+    }
+    tideCard.appendChild(el("p", "sub", "NOAA station " + st.id + ". Times in " + tz + "."));
+  }
+  sailPanel.appendChild(tideCard);
+
+  const adv = model.marineAdvisoryReport;
+  const advCard = el("section", adv && adv.ok && adv.items.length ? "card bad" : "card");
+  advCard.appendChild(el("h2", null, "Marine advisories"));
+  if (!adv || !adv.ok) {
+    advCard.appendChild(el("p", "reason", "Unavailable. " + ((adv && (adv.pointReason || adv.zoneReason)) || "Marine alerts didn't load.")));
+  } else if (!adv.items.length) {
+    const where = adv.zoneId ? "this point or marine zone " + adv.zoneId : "this point";
+    let line = "No marine advisories for " + where + ".";
+    if (adv.pointFailed) line += " Alerts for the exact point didn't load (" + (adv.pointReason || "failed") + ").";
+    if (adv.zoneFailed) line += " Coastal zone alerts didn't load (" + (adv.zoneReason || "failed") + ").";
+    advCard.appendChild(el("p", "lead", line));
+  } else {
+    for (const item of adv.items) {
+      const wrap = el("div", "alert-item");
+      wrap.appendChild(el("strong", null, item.event + (item.severity ? " · " + item.severity : "")));
+      wrap.appendChild(el("p", "sub", item.headline));
+      if (item.ends) {
+        const ends = new Date(item.ends);
+        if (!Number.isNaN(ends.getTime())) wrap.appendChild(el("p", "sub", "Until " + formatFull(ends, tz)));
+      }
+      advCard.appendChild(wrap);
+    }
+    if (adv.zoneId) advCard.appendChild(el("p", "sub", "Includes active alerts for marine zone " + adv.zoneId + " and marine alerts at this point."));
+  }
+  sailPanel.appendChild(advCard);
+
 
 
   const skiPanel = document.getElementById("panel-ski");
