@@ -21,16 +21,18 @@
   <main>
     <p class="eyebrow">SB Surf</p>
     <h1 id="place">Today's surf</h1>
-    <p id="loc-note" class="note">Uses your location for today's surf, sailing, and skiing. Your phone will ask for location. If you say no, this shows Solana Beach, CA.</p>
+    <p id="loc-note" class="note">Uses your location for today's surf, sailing, skiing, and hiking. Your phone will ask for location. If you say no, this shows Solana Beach, CA.</p>
     <button id="refresh" type="button">Use my location</button>
-    <div class="tabs" role="tablist" aria-label="Surf, sailing, or skiing">
+    <div class="tabs" role="tablist" aria-label="Surf, sailing, skiing, or hiking">
       <button id="tab-surf" type="button" role="tab" aria-selected="true" aria-controls="panel-surf">Surf</button>
       <button id="tab-sailing" type="button" role="tab" aria-selected="false" aria-controls="panel-sailing">Sailing</button>
       <button id="tab-ski" type="button" role="tab" aria-selected="false" aria-controls="panel-ski">Skiing</button>
+      <button id="tab-hike" type="button" role="tab" aria-selected="false" aria-controls="panel-hike">Hiking</button>
     </div>
     <div id="panel-surf" role="tabpanel" aria-labelledby="tab-surf"></div>
     <div id="panel-sailing" role="tabpanel" aria-labelledby="tab-sailing" hidden></div>
     <div id="panel-ski" role="tabpanel" aria-labelledby="tab-ski" hidden></div>
+    <div id="panel-hike" role="tabpanel" aria-labelledby="tab-hike" hidden></div>
     <footer>
       <p>iPhone: tap Share, then Add to Home Screen. The icon is named SB Surf. Each open loads live data. Nothing here is saved from an earlier briefing.</p>
       <p id="sources"></p>

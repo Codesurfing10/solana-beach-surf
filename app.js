@@ -561,6 +561,87 @@ function buildSkiing({ current, daily, periods, weatherOk, alerts, gridProps, gr
   };
 }
 
+
+const HIKE_RISK_RE = /heat|high wind|wind advisory|extreme wind|flood|red flag|fire weather/i;
+
+async function loadParkUnit(lat, lon) {
+  const url = "https://services1.arcgis.com/fBc8EJBxQRMcHlei/arcgis/rest/services/NPS_Land_Resources_Division_Boundary_and_Tract_Data_Service/FeatureServer/2/query?f=json&geometryType=esriGeometryPoint&geometry="
+    + encodeURIComponent(lon + "," + lat)
+    + "&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=UNIT_CODE,UNIT_NAME&returnGeometry=false";
+  try {
+    const data = await fetchJson(url);
+    if (data.error) return { ok: false, reason: "NPS boundary service returned an error." };
+    const feat = (data.features || [])[0];
+    if (!feat) return { ok: true, inside: false };
+    const attrs = feat.attributes || {};
+    return { ok: true, inside: true, code: attrs.UNIT_CODE || "", name: attrs.UNIT_NAME || "" };
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+}
+
+function buildHiking({ current, alerts, gridProps, gridOk }) {
+  const missing = [];
+  let tempF = null;
+  if (!current || current.temperature == null) missing.push("temperature");
+  else if ((current.temperatureUnit || "F") === "C") tempF = Number(current.temperature) * 9 / 5 + 32;
+  else tempF = Number(current.temperature);
+  const wind = current ? windUpper(current.windSpeed) : null;
+  if (wind == null) missing.push("wind");
+  const pop = current && current.probabilityOfPrecipitation ? current.probabilityOfPrecipitation.value : null;
+  if (pop == null || Number.isNaN(Number(pop))) missing.push("precipitation chance");
+  const elevationM = gridOk && gridProps && gridProps.elevation && gridProps.elevation.value != null
+    ? Number(gridProps.elevation.value) : null;
+  if (elevationM == null || Number.isNaN(elevationM)) missing.push("elevation");
+  const alertsKnown = Boolean(alerts && alerts.ok);
+  if (!alertsKnown) missing.push("alerts");
+  const riskAlerts = alertsKnown ? alerts.items.filter((item) => HIKE_RISK_RE.test([item.event, item.headline].join(" "))) : [];
+
+  const parts = [];
+  let points = 1;
+  function add(name, pts, detail) {
+    parts.push({ name, pts, detail });
+    points += pts;
+  }
+  if (tempF != null && !Number.isNaN(tempF)) {
+    let pts = 0;
+    if (tempF < 32) pts = 3;
+    else if (tempF >= 95) pts = 4;
+    else if (tempF >= 90) pts = 3;
+    else if (tempF >= 85) pts = 2;
+    else if (tempF >= 80 || tempF < 50) pts = 1;
+    add("Temperature", pts, Math.round(tempF) + "°F");
+  }
+  if (wind != null) {
+    let pts = 0;
+    if (wind >= 30) pts = 3;
+    else if (wind >= 20) pts = 2;
+    else if (wind >= 15) pts = 1;
+    add("Wind", pts, (current.windSpeed || wind + " mph") + (current.windDirection ? " " + current.windDirection : ""));
+  }
+  if (pop != null && !Number.isNaN(Number(pop))) {
+    const n = Number(pop);
+    let pts = 0;
+    if (n >= 60) pts = 2;
+    else if (n >= 30) pts = 1;
+    add("Precipitation chance", pts, n + "%");
+  }
+  if (elevationM != null && !Number.isNaN(elevationM)) {
+    let pts = 0;
+    if (elevationM >= 2500) pts = 2;
+    else if (elevationM >= 1500) pts = 1;
+    add("Elevation", pts, metersAndFeet(elevationM));
+  }
+  if (alertsKnown) {
+    const severe = riskAlerts.some((item) => /extreme|severe/i.test(item.severity || "") || /warning/i.test(item.event || ""));
+    add("Heat, wind, flood, or fire alerts", riskAlerts.length ? (severe ? 2 : 1) : 0, riskAlerts.length ? riskAlerts.map((item) => item.event).join(", ") : "none");
+  }
+  const incomplete = missing.length > 0;
+  const score = incomplete ? null : Math.min(10, points);
+  const label = score == null ? null : score <= 3 ? "easy" : score <= 6 ? "moderate" : "hard";
+  return { ok: true, incomplete, missing, parts, score, label, riskAlerts, alertsKnown, alertsReason: alertsKnown ? null : (alerts && alerts.reason) || "Alerts didn't load." };
+}
+
 function buildSailing({ periods, gridProps, gridOk, gridReason, marine, seaward, timeZone, now }) {
   const tz = timeZone || "UTC";
   const todayKey = localDateKey(now, tz);
@@ -681,13 +762,14 @@ export async function loadBriefing(lat, lon, now = new Date()) {
   const civilBegin = astro.civilTwilightBegin ? new Date(astro.civilTwilightBegin) : null;
   const civilEnd = astro.civilTwilightEnd ? new Date(astro.civilTwilightEnd) : null;
 
-  const [forecastR, hourlyR, alertsR, marine, tides, gridR] = await Promise.all([
+  const [forecastR, hourlyR, alertsR, marine, tides, gridR, parkUnit] = await Promise.all([
     fetchSection(props.forecast),
     fetchSection(props.forecastHourly),
     fetchSection("https://api.weather.gov/alerts/active?point=" + latR + "," + lonR),
     loadMarine(latR, lonR, props, now),
     loadTides(latR, lonR, timeZone, now),
     fetchSection(props.forecastGridData),
+    loadParkUnit(latR, lonR),
   ]);
 
   const periods = hourlyR.ok ? ((hourlyR.data.properties && hourlyR.data.properties.periods) || []) : [];
@@ -774,11 +856,17 @@ export async function loadBriefing(lat, lon, now = new Date()) {
     timeZone,
     now,
   });
+  const hiking = buildHiking({
+    current: weather.current,
+    alerts,
+    gridProps,
+    gridOk: gridR.ok,
+  });
 
   return {
     place, timeZone, lat: latR, lon: lonR, now,
     sunrise, sunset, civilBegin, civilEnd,
-    weather, marine, tides, alerts, best, sailing, skiing, marineAdvisoryReport,
+    weather, marine, tides, alerts, best, sailing, skiing, hiking, parkUnit, marineAdvisoryReport,
     pointsUrl: "https://api.weather.gov/points/" + latR + "," + lonR,
     office: props.gridId || "",
   };
@@ -798,6 +886,8 @@ function showLoading(text) {
   if (sail) sail.replaceChildren();
   const skiClear = document.getElementById("panel-ski");
   if (skiClear) skiClear.replaceChildren();
+  const hikeClear = document.getElementById("panel-hike");
+  if (hikeClear) hikeClear.replaceChildren();
   const c = el("section", "card");
   c.appendChild(el("h2", null, "Loading"));
   c.appendChild(el("p", "lead", text));
@@ -810,10 +900,10 @@ function render(model, loc) {
   const z = zoneAbbrev(model.now, model.timeZone);
   const note = document.getElementById("loc-note");
   if (loc.fallback) {
-    note.textContent = loc.reason + " Showing the Solana Beach fallback (" + FALLBACK.lat + ", " + FALLBACK.lon + "). Place name below is from NWS. Uses your location for today's surf, sailing, and skiing when you allow it.";
+    note.textContent = loc.reason + " Showing the Solana Beach fallback (" + FALLBACK.lat + ", " + FALLBACK.lon + "). Place name below is from NWS. Uses your location for today's surf, sailing, skiing, and hiking when you allow it.";
   } else {
     const acc = loc.accuracy != null ? " Phone accuracy about " + Math.round(loc.accuracy) + " m." : "";
-    note.textContent = "Uses your location for today's surf, sailing, and skiing (" + model.lat + ", " + model.lon + ")." + acc;
+    note.textContent = "Uses your location for today's surf, sailing, skiing, and hiking (" + model.lat + ", " + model.lon + ")." + acc;
   }
 
   const cards = document.getElementById("panel-surf");
@@ -1133,6 +1223,61 @@ function render(model, loc) {
   }
   skiPanel.appendChild(skiCard);
 
+
+  const hikePanel = document.getElementById("panel-hike");
+  hikePanel.replaceChildren();
+  const hikeCard = el("section", "card");
+  hikeCard.appendChild(el("h2", null, "Hike difficulty"));
+  const hike = model.hiking;
+  if (!hike || !hike.ok) {
+    hikeCard.appendChild(el("p", "reason", "Unavailable. Score didn't load."));
+  } else if (hike.incomplete) {
+    hikeCard.appendChild(el("p", "lead", "Score incomplete. Missing " + hike.missing.join(", ") + ". No 1–10 label is shown."));
+  } else {
+    hikeCard.appendChild(el("p", "big", hike.score + " / 10"));
+    hikeCard.appendChild(el("p", "lead", hike.label.charAt(0).toUpperCase() + hike.label.slice(1) + ". This is weather difficulty for being outside, not a named trail."));
+  }
+  if (hike && hike.ok && hike.parts.length) {
+    const list = el("ul");
+    const base = el("li");
+    base.appendChild(el("span", null, "Starting point"));
+    base.appendChild(el("span", null, "1"));
+    list.appendChild(base);
+    for (const part of hike.parts) {
+      const li = el("li");
+      li.appendChild(el("span", null, part.name));
+      li.appendChild(el("span", null, "+" + part.pts + " · " + part.detail));
+      list.appendChild(li);
+    }
+    hikeCard.appendChild(list);
+    hikeCard.appendChild(el("p", "sub", "Rules: 95°F or hotter +4, 90–94 +3, 85–89 +2, 80–84 or 32–49 +1, below 32°F +3. Wind 15–19 mph +1, 20–29 +2, 30+ +3. Rain chance 30–59% +1, 60%+ +2. Elevation 1,500–2,499 m +1, 2,500 m+ +2. A matching watch or advisory +1, a warning or extreme/severe alert +2. Easy is 1–3, moderate 4–6, hard 7–10, capped at 10."));
+  }
+  hikePanel.appendChild(hikeCard);
+
+  const riskCard = el("section", hike && hike.riskAlerts && hike.riskAlerts.length ? "card bad" : "card");
+  riskCard.appendChild(el("h2", null, "Closures and risks"));
+  if (!hike || !hike.alertsKnown) {
+    riskCard.appendChild(el("p", "reason", "Weather alerts unavailable. " + ((hike && hike.alertsReason) || "")));
+  } else if (!hike.riskAlerts.length) {
+    riskCard.appendChild(el("p", "lead", "No active heat, wind, flood, or fire-weather alerts for this point."));
+  } else {
+    for (const item of hike.riskAlerts) {
+      const wrap = el("div", "alert-item");
+      wrap.appendChild(el("strong", null, item.event + (item.severity ? " · " + item.severity : "")));
+      wrap.appendChild(el("p", "sub", item.headline));
+      riskCard.appendChild(wrap);
+    }
+  }
+  const park = model.parkUnit;
+  if (!park || !park.ok) {
+    riskCard.appendChild(el("p", "reason", "Closure check unavailable. " + ((park && park.reason) || "")));
+  } else if (!park.inside) {
+    riskCard.appendChild(el("p", "sub", "No closure feed for this spot. The National Park Service boundary service shows no park unit here, and park alerts require an API key."));
+  } else {
+    riskCard.appendChild(el("p", "sub", "No closure feed for this spot. The point is inside " + (park.name || park.code || "a National Park Service unit") + (park.code ? " (" + park.code + ")" : "") + ", but NPS alert text requires an API key, so no closure notices are listed."));
+  }
+  hikePanel.appendChild(riskCard);
+
   const sources = document.getElementById("sources");
   sources.replaceChildren();
   const loaded = el("span", null, "Loaded " + formatFull(model.now, tz) + " " + z + ". ");
@@ -1204,7 +1349,7 @@ async function run() {
 }
 
 function showTab(which) {
-  for (const name of ["surf", "sailing", "ski"]) {
+  for (const name of ["surf", "sailing", "ski", "hike"]) {
     document.getElementById("panel-" + name).hidden = name !== which;
     document.getElementById("tab-" + name).setAttribute("aria-selected", name === which ? "true" : "false");
   }
@@ -1215,5 +1360,6 @@ if (typeof document !== "undefined") {
   document.getElementById("tab-surf").addEventListener("click", () => showTab("surf"));
   document.getElementById("tab-sailing").addEventListener("click", () => showTab("sailing"));
   document.getElementById("tab-ski").addEventListener("click", () => showTab("ski"));
+  document.getElementById("tab-hike").addEventListener("click", () => showTab("hike"));
   run();
 }
