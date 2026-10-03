@@ -100,11 +100,11 @@ a { color: var(--accent); }
 
 .tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 8px;
   margin-top: 14px;
 }
-.tabs button { margin-top: 0; border-radius: 14px; }
+.tabs button { margin-top: 0; border-radius: 14px; padding: 12px 6px; font-size: 0.95rem; }
 .tabs button[aria-selected="true"] {
   background: #1c6274;
   border-color: var(--accent);

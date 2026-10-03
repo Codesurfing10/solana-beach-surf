@@ -482,6 +482,70 @@ function windBand(upper) {
   return "strong";
 }
 
+
+const WINTER_RE = /snow|flurr|blizzard|winter|sleet|freezing rain|ice storm|wintry|frost|freeze/i;
+const LOW_ELEVATION_M = 1500;
+
+function metersAndFeet(m) {
+  const ft = Number(m) * 3.280839895;
+  return Math.round(ft) + " ft (" + Math.round(Number(m)) + " m)";
+}
+
+function mmAndInches(mm) {
+  const inches = Number(mm) / 25.4;
+  const mmText = Number.isInteger(Number(mm)) ? String(mm) : Number(mm).toFixed(1);
+  return inches.toFixed(2) + " in (" + mmText + " mm)";
+}
+
+function snowOutlook(series, now) {
+  const values = (series && series.values) || [];
+  const upcoming = [];
+  for (const v of values) {
+    if (v.value == null || Number.isNaN(Number(v.value))) continue;
+    const iv = parseInterval(v.validTime);
+    if (!iv || iv.end <= now) continue;
+    upcoming.push({ value: Number(v.value), start: iv.start, end: iv.end });
+  }
+  if (!upcoming.length) return { status: "missing" };
+  const positive = upcoming.filter((row) => row.value > 0);
+  if (positive.length) return { status: "snow", rows: positive.slice(0, 6) };
+  return { status: "none", until: upcoming[upcoming.length - 1].end };
+}
+
+function buildSkiing({ current, daily, periods, weatherOk, alerts, gridProps, gridOk, gridReason, timeZone, now }) {
+  if (!weatherOk && !gridOk) {
+    return { ok: false, reason: "NWS forecast and grid didn't load" + (gridReason ? " (" + gridReason + ")" : "") + "." };
+  }
+  const tz = timeZone || "UTC";
+  const elevation = gridOk && gridProps && gridProps.elevation && gridProps.elevation.value != null
+    ? Number(gridProps.elevation.value)
+    : null;
+  const elevationText = elevation == null || Number.isNaN(elevation) ? null : metersAndFeet(elevation);
+  const snow = gridOk && gridProps ? snowOutlook(gridProps.snowfallAmount, now) : { status: "missing" };
+  const winterPeriods = (daily || []).filter((period) => WINTER_RE.test([period.name, period.shortForecast, period.detailedForecast].join(" "))).slice(0, 4);
+  const winterHours = (periods || []).filter((period) => new Date(period.endTime) > now && WINTER_RE.test(period.shortForecast || "")).slice(0, 6);
+  const winterAlerts = alerts && alerts.ok
+    ? alerts.items.filter((item) => WINTER_RE.test([item.event, item.headline].join(" ")))
+    : [];
+  const hasSnow = snow.status === "snow" || winterPeriods.length > 0 || winterHours.length > 0 || winterAlerts.length > 0;
+  const low = elevation != null && !Number.isNaN(elevation) && elevation < LOW_ELEVATION_M;
+  return {
+    ok: true,
+    notMountain: Boolean(low && !hasSnow),
+    elevationText,
+    elevationKnown: elevation != null && !Number.isNaN(elevation),
+    snow,
+    winterPeriods,
+    winterHours,
+    winterAlerts,
+    alertsOk: Boolean(alerts && alerts.ok),
+    alertsReason: alerts && alerts.ok ? null : (alerts && alerts.reason) || "Alerts didn't load.",
+    current: current || null,
+    today: (daily && daily[0]) || null,
+    gridOk,
+  };
+}
+
 function buildSailing({ periods, gridProps, gridOk, gridReason, marine, seaward, timeZone, now }) {
   const tz = timeZone || "UTC";
   const todayKey = localDateKey(now, tz);
@@ -654,9 +718,10 @@ export async function loadBriefing(lat, lon, now = new Date()) {
     timeZone,
     now,
   });
+  const gridProps = gridR.ok ? (gridR.data.properties || {}) : null;
   const sailing = buildSailing({
     periods,
-    gridProps: gridR.ok ? (gridR.data.properties || {}) : null,
+    gridProps,
     gridOk: gridR.ok,
     gridReason: gridR.ok ? null : gridR.reason,
     marine,
@@ -664,11 +729,23 @@ export async function loadBriefing(lat, lon, now = new Date()) {
     timeZone,
     now,
   });
+  const skiing = buildSkiing({
+    current: weather.current,
+    daily,
+    periods,
+    weatherOk: weather.ok,
+    alerts,
+    gridProps,
+    gridOk: gridR.ok,
+    gridReason: gridR.ok ? null : gridR.reason,
+    timeZone,
+    now,
+  });
 
   return {
     place, timeZone, lat: latR, lon: lonR, now,
     sunrise, sunset, civilBegin, civilEnd,
-    weather, marine, tides, alerts, best, sailing,
+    weather, marine, tides, alerts, best, sailing, skiing,
     pointsUrl: "https://api.weather.gov/points/" + latR + "," + lonR,
     office: props.gridId || "",
   };
@@ -686,6 +763,8 @@ function showLoading(text) {
   cards.replaceChildren();
   const sail = document.getElementById("panel-sailing");
   if (sail) sail.replaceChildren();
+  const skiClear = document.getElementById("panel-ski");
+  if (skiClear) skiClear.replaceChildren();
   const c = el("section", "card");
   c.appendChild(el("h2", null, "Loading"));
   c.appendChild(el("p", "lead", text));
@@ -698,10 +777,10 @@ function render(model, loc) {
   const z = zoneAbbrev(model.now, model.timeZone);
   const note = document.getElementById("loc-note");
   if (loc.fallback) {
-    note.textContent = loc.reason + " Showing the Solana Beach fallback (" + FALLBACK.lat + ", " + FALLBACK.lon + "). Place name below is from NWS. Uses your location for today's surf and sailing when you allow it.";
+    note.textContent = loc.reason + " Showing the Solana Beach fallback (" + FALLBACK.lat + ", " + FALLBACK.lon + "). Place name below is from NWS. Uses your location for today's surf, sailing, and skiing when you allow it.";
   } else {
     const acc = loc.accuracy != null ? " Phone accuracy about " + Math.round(loc.accuracy) + " m." : "";
-    note.textContent = "Uses your location for today's surf and sailing (" + model.lat + ", " + model.lon + ")." + acc;
+    note.textContent = "Uses your location for today's surf, sailing, and skiing (" + model.lat + ", " + model.lon + ")." + acc;
   }
 
   const cards = document.getElementById("panel-surf");
@@ -892,6 +971,83 @@ function render(model, loc) {
   }
   sailPanel.appendChild(seaCard);
 
+
+  const skiPanel = document.getElementById("panel-ski");
+  skiPanel.replaceChildren();
+  const skiCard = el("section", "card");
+  skiCard.appendChild(el("h2", null, "Skiing"));
+  if (!model.skiing || !model.skiing.ok) {
+    skiCard.appendChild(el("p", "reason", "Unavailable. " + ((model.skiing && model.skiing.reason) || "Skiing data didn't load.")));
+  } else {
+    const ski = model.skiing;
+    if (ski.notMountain) {
+      skiCard.appendChild(el("p", "lead", "Skiing conditions aren't available here. NWS elevation is " + ski.elevationText + ", under 1,500 m, and there is no snow or winter weather in the forecast or active alerts."));
+    } else if (ski.snow.status !== "snow" && !ski.winterPeriods.length && !ski.winterHours.length && !ski.winterAlerts.length) {
+      skiCard.appendChild(el("p", "lead", "No snow or winter weather is in the NWS forecast" + (ski.alertsOk ? " or active alerts" : "") + "."));
+    }
+    const cur = ski.current;
+    const today = ski.today;
+    if (cur && cur.temperature != null) {
+      skiCard.appendChild(el("p", "big", cur.temperature + "°" + (cur.temperatureUnit || "")));
+      skiCard.appendChild(el("p", "lead", (cur.windSpeed || "Wind unavailable") + (cur.windDirection ? " " + cur.windDirection : "") + (cur.shortForecast ? " · " + cur.shortForecast : "")));
+    } else if (today) {
+      skiCard.appendChild(el("p", "big", today.temperature != null ? today.temperature + "°" + (today.temperatureUnit || "") : "Temperature unavailable"));
+      skiCard.appendChild(el("p", "lead", (today.windSpeed || "Wind unavailable") + (today.windDirection ? " " + today.windDirection : "") + (today.shortForecast ? " · " + today.shortForecast : "")));
+    } else {
+      skiCard.appendChild(el("p", "reason", "Temperature and wind unavailable."));
+    }
+    if (cur && today && today.shortForecast && today.shortForecast !== cur.shortForecast) {
+      skiCard.appendChild(el("p", "sub", (today.name || "Forecast") + ": " + today.shortForecast + (today.temperature != null ? ". " + today.temperature + "°" + (today.temperatureUnit || "") : "") + (today.windSpeed ? ". Wind " + today.windSpeed + (today.windDirection ? " " + today.windDirection : "") : "")));
+    }
+    if (ski.elevationText) skiCard.appendChild(el("p", "sub", "NWS grid elevation " + ski.elevationText + "."));
+    else skiCard.appendChild(el("p", "reason", "Elevation unavailable" + (ski.gridOk ? "." : " (grid didn't load).")));
+    if (ski.snow.status === "none") {
+      skiCard.appendChild(el("p", "sub", "NWS snowfall amount is 0 mm through " + formatFull(ski.snow.until, tz) + "."));
+    } else if (ski.snow.status === "snow") {
+      const list = el("ul");
+      for (const row of ski.snow.rows) {
+        const li = el("li");
+        li.appendChild(el("span", null, formatFull(row.start, tz)));
+        li.appendChild(el("span", null, mmAndInches(row.value)));
+        list.appendChild(li);
+      }
+      skiCard.appendChild(el("p", "sub", "NWS snowfall amount, converted from millimeters."));
+      skiCard.appendChild(list);
+    } else {
+      skiCard.appendChild(el("p", "reason", "Snowfall amount unavailable."));
+    }
+    if (ski.winterPeriods.length || ski.winterHours.length) {
+      const list = el("ul");
+      for (const period of ski.winterPeriods) {
+        const li = el("li");
+        li.appendChild(el("span", null, period.name || "Forecast"));
+        li.appendChild(el("span", null, period.shortForecast || period.detailedForecast || ""));
+        list.appendChild(li);
+      }
+      for (const period of ski.winterHours) {
+        const li = el("li");
+        li.appendChild(el("span", null, formatWhen(new Date(period.startTime), tz)));
+        li.appendChild(el("span", null, period.shortForecast || ""));
+        list.appendChild(li);
+      }
+      skiCard.appendChild(list);
+    }
+    if (!ski.alertsOk) {
+      skiCard.appendChild(el("p", "reason", "Winter alerts unavailable. " + (ski.alertsReason || "")));
+    } else if (!ski.winterAlerts.length) {
+      skiCard.appendChild(el("p", "sub", "No snow or winter alerts for this point."));
+    } else {
+      for (const item of ski.winterAlerts) {
+        const wrap = el("div", "alert-item");
+        wrap.appendChild(el("strong", null, item.event));
+        wrap.appendChild(el("p", "sub", item.headline));
+        skiCard.appendChild(wrap);
+      }
+    }
+    skiCard.appendChild(el("p", "sub", "No resort snow report. Public resort feeds checked need a key or a known resort name, so none is shown."));
+  }
+  skiPanel.appendChild(skiCard);
+
   const sources = document.getElementById("sources");
   sources.replaceChildren();
   const loaded = el("span", null, "Loaded " + formatFull(model.now, tz) + " " + z + ". ");
@@ -963,16 +1119,16 @@ async function run() {
 }
 
 function showTab(which) {
-  const surf = which === "surf";
-  document.getElementById("panel-surf").hidden = !surf;
-  document.getElementById("panel-sailing").hidden = surf;
-  document.getElementById("tab-surf").setAttribute("aria-selected", surf ? "true" : "false");
-  document.getElementById("tab-sailing").setAttribute("aria-selected", surf ? "false" : "true");
+  for (const name of ["surf", "sailing", "ski"]) {
+    document.getElementById("panel-" + name).hidden = name !== which;
+    document.getElementById("tab-" + name).setAttribute("aria-selected", name === which ? "true" : "false");
+  }
 }
 
 if (typeof document !== "undefined") {
   document.getElementById("refresh").addEventListener("click", run);
   document.getElementById("tab-surf").addEventListener("click", () => showTab("surf"));
   document.getElementById("tab-sailing").addEventListener("click", () => showTab("sailing"));
+  document.getElementById("tab-ski").addEventListener("click", () => showTab("ski"));
   run();
 }
