@@ -10,7 +10,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="SB Surf">
   <meta name="format-detection" content="telephone=no">
-  <meta name="description" content="Today's local surf briefing from live NWS and NOAA data.">
+  <meta name="description" content="Today's local surf and sailing briefing from live NWS and NOAA data.">
   <title>SB Surf</title>
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icon-180.png">
@@ -21,9 +21,14 @@
   <main>
     <p class="eyebrow">SB Surf</p>
     <h1 id="place">Today's surf</h1>
-    <p id="loc-note" class="note">Uses your location for today's local surf. Your phone will ask for location. If you say no, this shows Solana Beach, CA.</p>
+    <p id="loc-note" class="note">Uses your location for today's local surf and sailing. Your phone will ask for location. If you say no, this shows Solana Beach, CA.</p>
     <button id="refresh" type="button">Use my location</button>
-    <div id="cards"></div>
+    <div class="tabs" role="tablist" aria-label="Surf or sailing">
+      <button id="tab-surf" type="button" role="tab" aria-selected="true" aria-controls="panel-surf">Surf</button>
+      <button id="tab-sailing" type="button" role="tab" aria-selected="false" aria-controls="panel-sailing">Sailing</button>
+    </div>
+    <div id="panel-surf" role="tabpanel" aria-labelledby="tab-surf"></div>
+    <div id="panel-sailing" role="tabpanel" aria-labelledby="tab-sailing" hidden></div>
     <footer>
       <p>iPhone: tap Share, then Add to Home Screen. The icon is named SB Surf. Each open loads live data. Nothing here is saved from an earlier briefing.</p>
       <p id="sources"></p>

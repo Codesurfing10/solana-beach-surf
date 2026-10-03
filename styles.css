@@ -97,3 +97,15 @@ li span:last-child { text-align: right; }
 .alert-item strong { display: block; color: var(--warn); }
 footer { color: var(--muted); font-size: 0.92rem; line-height: 1.45; margin-top: 18px; }
 a { color: var(--accent); }
+
+.tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 14px;
+}
+.tabs button { margin-top: 0; border-radius: 14px; }
+.tabs button[aria-selected="true"] {
+  background: #1c6274;
+  border-color: var(--accent);
+}

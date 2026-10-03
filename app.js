@@ -1,4 +1,4 @@
-// Live surf briefing. Numbers come only from NWS and NOAA responses.
+// Live surf and sailing briefing. Numbers come only from NWS and NOAA responses.
 // Browser fetches do not set User-Agent: api.weather.gov rejects that header on CORS preflight.
 
 const FALLBACK = { lat: 32.99, lon: -117.27 };
@@ -459,6 +459,119 @@ function buildBestWindow({ hourly, tides, sunrise, sunset, seaward, timeZone, no
   };
 }
 
+
+function gridSpeed(value, uom) {
+  if (value == null || Number.isNaN(Number(value))) return null;
+  const n = Number(value);
+  const unit = uom || "";
+  if (unit.includes("km_h")) {
+    const mph = n * 0.621371192;
+    return Math.round(mph) + " mph (" + Math.round(n) + " km/h)";
+  }
+  if (unit.includes("m_s")) {
+    const mph = n * 2.2369362921;
+    return Math.round(mph) + " mph (" + n.toFixed(1) + " m/s)";
+  }
+  return String(n) + (unit ? " (" + unit + ")" : "");
+}
+
+function windBand(upper) {
+  if (upper == null) return null;
+  if (upper < 10) return "light";
+  if (upper < 20) return "moderate";
+  return "strong";
+}
+
+function buildSailing({ periods, gridProps, gridOk, gridReason, marine, seaward, timeZone, now }) {
+  const tz = timeZone || "UTC";
+  const todayKey = localDateKey(now, tz);
+  const gustSeries = gridOk && gridProps ? gridProps.windGust : null;
+  const gustUom = gustSeries && gustSeries.uom;
+  if (!periods.length) {
+    return {
+      ok: false,
+      reason: "Hourly wind didn't load" + (gridReason ? " (" + gridReason + ")" : "") + ".",
+      hours: [],
+      sea: marine && marine.ok ? marine : marine,
+    };
+  }
+  const hours = periods.filter((p) => {
+    const start = new Date(p.startTime);
+    const end = new Date(p.endTime);
+    if (!(end > now)) return false;
+    return localDateKey(start, tz) === todayKey || (start <= now && now < end);
+  }).slice(0, 18).map((p) => {
+    const start = new Date(p.startTime);
+    const end = new Date(p.endTime);
+    const when = start <= now && now < end ? now : start;
+    const gustHit = gustSeries ? intervalValue(gustSeries, when) : null;
+    const gust = gustHit && gustHit.value != null ? gridSpeed(gustHit.value, gustUom) : null;
+    return {
+      start,
+      wind: p.windSpeed || "",
+      dir: p.windDirection || "",
+      upper: windUpper(p.windSpeed),
+      gust,
+    };
+  });
+  const current = hours[0] || null;
+  let note = null;
+  let noteReason = null;
+  if (!current || current.upper == null) {
+    noteReason = "The hourly forecast had no wind speed to base a sailing note on.";
+  } else {
+    const band = windBand(current.upper);
+    const bits = ["Now the wind is " + band + ": " + current.wind + (current.dir ? " " + current.dir : "") + "."];
+    if (current.gust) bits.push("Grid gust for this hour is " + current.gust + ".");
+    else if (!gustSeries) bits.push("Gusts are unavailable for this point.");
+    const facing = classifyWind(current.dir, seaward);
+    if (facing && seaward != null) {
+      bits.push("That wind is " + facing + ", sea toward " + cardinal(seaward) + ".");
+    }
+    const later = hours.slice(1);
+    const light = hours.slice().sort((a, b) => a.upper - b.upper || a.start - b.start)[0];
+    const strong = hours.slice().sort((a, b) => b.upper - a.upper || a.start - b.start)[0];
+    if (strong && light && strong.upper > light.upper) {
+      bits.push("Lightest remaining hour is " + formatWhen(light.start, tz) + " (" + light.wind + (light.dir ? " " + light.dir : "") + "). Strongest is " + formatWhen(strong.start, tz) + " (" + strong.wind + (strong.dir ? " " + strong.dir : "") + ").");
+    }
+    if (seaward != null) {
+      const other = [];
+      for (const h of later) {
+        const cls = classifyWind(h.dir, seaward);
+        if (cls && cls !== facing && !other.some((o) => o.cls === cls)) other.push({ cls, h });
+      }
+      if (other.length) {
+        bits.push("Later, wind is " + other.map((o) => o.cls + " at " + formatWhen(o.h.start, tz) + " (" + o.h.wind + " " + o.h.dir + ")").join("; ") + ".");
+      }
+    }
+    const wave = marine && marine.ok && marine.rows && marine.rows.find((r) => r.label === "Wave height");
+    if (wave) bits.push("Sea height on the marine grid is " + wave.text + ".");
+    bits.push("Light is under 10 mph, moderate is 10–19, strong is 20 or more, using the higher number when NWS gives a range.");
+    note = bits.join(" ");
+  }
+  let sea = null;
+  let seaReason = null;
+  if (marine && marine.ok) {
+    const wave = marine.rows.find((r) => r.label === "Wave height");
+    const windWave = marine.rows.find((r) => r.label === "Wind wave");
+    const period = marine.rows.find((r) => r.label === "Wave period");
+    sea = { wave, windWave, period, how: marine.how, gridId: marine.gridId, gridX: marine.gridX, gridY: marine.gridY };
+  } else {
+    seaReason = (marine && marine.reason) || "Sea height didn't load.";
+  }
+  return {
+    ok: true,
+    hours,
+    current,
+    note,
+    noteReason,
+    gustsOk: Boolean(gustSeries),
+    gustReason: gustSeries ? null : (gridOk ? "NWS grid has no gust field for this point." : "Gusts didn't load (" + (gridReason || "no grid") + ")."),
+    sea,
+    seaReason,
+  };
+}
+
 async function fetchSection(url) {
   if (!url) return { ok: false, reason: "No link from NWS." };
   try {
@@ -489,12 +602,13 @@ export async function loadBriefing(lat, lon, now = new Date()) {
   const civilBegin = astro.civilTwilightBegin ? new Date(astro.civilTwilightBegin) : null;
   const civilEnd = astro.civilTwilightEnd ? new Date(astro.civilTwilightEnd) : null;
 
-  const [forecastR, hourlyR, alertsR, marine, tides] = await Promise.all([
+  const [forecastR, hourlyR, alertsR, marine, tides, gridR] = await Promise.all([
     fetchSection(props.forecast),
     fetchSection(props.forecastHourly),
     fetchSection("https://api.weather.gov/alerts/active?point=" + latR + "," + lonR),
     loadMarine(latR, lonR, props, now),
     loadTides(latR, lonR, timeZone, now),
+    fetchSection(props.forecastGridData),
   ]);
 
   const periods = hourlyR.ok ? ((hourlyR.data.properties && hourlyR.data.properties.periods) || []) : [];
@@ -530,12 +644,23 @@ export async function loadBriefing(lat, lon, now = new Date()) {
     };
   }
 
+  const seaward = marine.seaward != null ? marine.seaward : null;
   const best = buildBestWindow({
     hourly: periods,
     tides,
     sunrise,
     sunset,
-    seaward: marine.seaward != null ? marine.seaward : null,
+    seaward,
+    timeZone,
+    now,
+  });
+  const sailing = buildSailing({
+    periods,
+    gridProps: gridR.ok ? (gridR.data.properties || {}) : null,
+    gridOk: gridR.ok,
+    gridReason: gridR.ok ? null : gridR.reason,
+    marine,
+    seaward,
     timeZone,
     now,
   });
@@ -543,7 +668,7 @@ export async function loadBriefing(lat, lon, now = new Date()) {
   return {
     place, timeZone, lat: latR, lon: lonR, now,
     sunrise, sunset, civilBegin, civilEnd,
-    weather, marine, tides, alerts, best,
+    weather, marine, tides, alerts, best, sailing,
     pointsUrl: "https://api.weather.gov/points/" + latR + "," + lonR,
     office: props.gridId || "",
   };
@@ -557,8 +682,10 @@ function el(tag, className, text) {
 }
 
 function showLoading(text) {
-  const cards = document.getElementById("cards");
+  const cards = document.getElementById("panel-surf");
   cards.replaceChildren();
+  const sail = document.getElementById("panel-sailing");
+  if (sail) sail.replaceChildren();
   const c = el("section", "card");
   c.appendChild(el("h2", null, "Loading"));
   c.appendChild(el("p", "lead", text));
@@ -571,13 +698,13 @@ function render(model, loc) {
   const z = zoneAbbrev(model.now, model.timeZone);
   const note = document.getElementById("loc-note");
   if (loc.fallback) {
-    note.textContent = loc.reason + " Showing the Solana Beach fallback (" + FALLBACK.lat + ", " + FALLBACK.lon + "). Place name below is from NWS. Uses your location for today's local surf when you allow it.";
+    note.textContent = loc.reason + " Showing the Solana Beach fallback (" + FALLBACK.lat + ", " + FALLBACK.lon + "). Place name below is from NWS. Uses your location for today's surf and sailing when you allow it.";
   } else {
     const acc = loc.accuracy != null ? " Phone accuracy about " + Math.round(loc.accuracy) + " m." : "";
-    note.textContent = "Uses your location for today's local surf (" + model.lat + ", " + model.lon + ")." + acc;
+    note.textContent = "Uses your location for today's surf and sailing (" + model.lat + ", " + model.lon + ")." + acc;
   }
 
-  const cards = document.getElementById("cards");
+  const cards = document.getElementById("panel-surf");
   cards.replaceChildren();
   const tz = model.timeZone;
 
@@ -710,6 +837,61 @@ function render(model, loc) {
   }
   cards.appendChild(hazards);
 
+  const sailPanel = document.getElementById("panel-sailing");
+  sailPanel.replaceChildren();
+  const sailingCard = el("section", "card");
+  sailingCard.appendChild(el("h2", null, "Sailing"));
+  if (!model.sailing || !model.sailing.ok) {
+    sailingCard.appendChild(el("p", "reason", "Unavailable. " + ((model.sailing && model.sailing.reason) || "Sailing data didn't load.")));
+  } else {
+    if (model.sailing.note) sailingCard.appendChild(el("p", "lead", model.sailing.note));
+    else sailingCard.appendChild(el("p", "reason", "Sailing note unavailable. " + (model.sailing.noteReason || "")));
+    const curS = model.sailing.current;
+    if (curS) {
+      sailingCard.appendChild(el("p", "big", (curS.wind || "Wind unavailable") + (curS.dir ? " " + curS.dir : "")));
+      if (curS.gust) sailingCard.appendChild(el("p", "sub", "Gust " + curS.gust));
+      else sailingCard.appendChild(el("p", "reason", model.sailing.gustReason || "Gust unavailable for this hour."));
+    }
+    if (model.sailing.hours.length) {
+      const list = el("ul");
+      for (const h of model.sailing.hours) {
+        const li = el("li");
+        li.appendChild(el("span", null, formatWhen(h.start, tz)));
+        const right = (h.wind || "—") + (h.dir ? " " + h.dir : "") + (h.gust ? " · gust " + h.gust : " · gust unavailable");
+        li.appendChild(el("span", null, right));
+        list.appendChild(li);
+      }
+      sailingCard.appendChild(list);
+    }
+    if (!model.sailing.gustsOk) {
+      sailingCard.appendChild(el("p", "sub", model.sailing.gustReason || "Gusts unavailable."));
+    } else {
+      sailingCard.appendChild(el("p", "sub", "Gusts are the NWS grid at this point. Speeds in mph are converted from the grid unit and the grid value is shown beside them."));
+    }
+  }
+  sailPanel.appendChild(sailingCard);
+
+  const seaCard = el("section", "card");
+  seaCard.appendChild(el("h2", null, "Sea"));
+  if (!model.sailing || !model.sailing.sea) {
+    seaCard.appendChild(el("p", "reason", "Unavailable. " + ((model.sailing && model.sailing.seaReason) || "Sea height didn't load.")));
+  } else {
+    const sea = model.sailing.sea;
+    if (sea.wave) seaCard.appendChild(el("p", "big", sea.wave.text));
+    else seaCard.appendChild(el("p", "reason", "Wave height unavailable on this marine grid."));
+    const seaList = el("ul");
+    for (const row of [sea.wave, sea.windWave, sea.period]) {
+      if (!row) continue;
+      const li = el("li");
+      li.appendChild(el("span", null, row.label));
+      li.appendChild(el("span", null, row.text));
+      seaList.appendChild(li);
+    }
+    seaCard.appendChild(seaList);
+    seaCard.appendChild(el("p", "sub", (sea.how || "") + " NWS grid " + sea.gridId + " " + sea.gridX + "," + sea.gridY + ". Forecast grid, not a buoy."));
+  }
+  sailPanel.appendChild(seaCard);
+
   const sources = document.getElementById("sources");
   sources.replaceChildren();
   const loaded = el("span", null, "Loaded " + formatFull(model.now, tz) + " " + z + ". ");
@@ -765,7 +947,7 @@ async function run() {
     const model = await loadBriefing(loc.lat, loc.lon);
     render(model, loc);
   } catch (e) {
-    const cards = document.getElementById("cards");
+    const cards = document.getElementById("panel-surf");
     cards.replaceChildren();
     const c = el("section", "card");
     c.appendChild(el("h2", null, "Forecast"));
@@ -780,7 +962,17 @@ async function run() {
   }
 }
 
+function showTab(which) {
+  const surf = which === "surf";
+  document.getElementById("panel-surf").hidden = !surf;
+  document.getElementById("panel-sailing").hidden = surf;
+  document.getElementById("tab-surf").setAttribute("aria-selected", surf ? "true" : "false");
+  document.getElementById("tab-sailing").setAttribute("aria-selected", surf ? "false" : "true");
+}
+
 if (typeof document !== "undefined") {
   document.getElementById("refresh").addEventListener("click", run);
+  document.getElementById("tab-surf").addEventListener("click", () => showTab("surf"));
+  document.getElementById("tab-sailing").addEventListener("click", () => showTab("sailing"));
   run();
 }
