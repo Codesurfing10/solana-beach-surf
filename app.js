@@ -958,7 +958,7 @@ function render(model, loc) {
       list.appendChild(li);
     }
     waves.appendChild(list);
-    waves.appendChild(el("p", "sub", model.marine.how + " NWS grid " + model.marine.gridId + " " + model.marine.gridX + "," + model.marine.gridY + ". This is a forecast grid, not a buoy."));
+    waves.appendChild(el("p", "sub", model.marine.how + " NWS marine forecast grid " + model.marine.gridId + " " + model.marine.gridX + "," + model.marine.gridY + " for this location."));
   }
   cards.appendChild(waves);
 
@@ -1090,7 +1090,7 @@ function render(model, loc) {
       seaList.appendChild(li);
     }
     seaCard.appendChild(seaList);
-    seaCard.appendChild(el("p", "sub", (sea.how || "") + " NWS grid " + sea.gridId + " " + sea.gridX + "," + sea.gridY + ". Forecast grid, not a buoy."));
+    seaCard.appendChild(el("p", "sub", (sea.how || "") + " NWS marine forecast grid " + sea.gridId + " " + sea.gridX + "," + sea.gridY + " for this location."));
   }
   sailPanel.appendChild(seaCard);
 
